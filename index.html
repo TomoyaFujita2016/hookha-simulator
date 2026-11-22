@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>シーシャ熱・香りシミュレーター</title>
+<meta name="description" content="ボウルと HMD の断面形状、炭の配置、吸う強さから、葉の上・中・下層の温度と香料の気化をシミュレーションします。">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header>
+  <h1>シーシャ熱・香りシミュレーター</h1>
+  <p>ボウルと HMD の断面、炭の配置、吸う強さから、葉の上・中・下層の温度と、温度ごとに出てくる香料を計算します。</p>
+</header>
+
+<main>
+  <section class="panel controls" aria-label="条件設定">
+    <h2>条件</h2>
+    <label>ボウル<select id="selBowl"></select></label>
+    <label>HMD<select id="selHmd"></select></label>
+    <label>炭の配置<select id="selLayout"></select></label>
+    <label>炭のサイズ<select id="selCoal"></select></label>
+    <label>フレーバー<select id="selFlavor"></select></label>
+    <p class="note" id="flavorDesc"></p>
+
+    <h2>時間</h2>
+    <div class="row">
+      <button id="btnPlay" class="primary">再生</button>
+      <button id="btnReset">リセット</button>
+    </div>
+    <button id="btnWarm">吸わずに5分進める（蒸らし）</button>
+    <label>速度<select id="selSpeed">
+      <option value="1">等速</option><option value="5">5倍</option><option value="20" selected>20倍</option><option value="60">60倍</option>
+    </select></label>
+    <label class="check"><input type="checkbox" id="chkAuto"> 自動で吸う（2.6秒・12 L/分を約20秒ごと）</label>
+    <label class="check"><input type="checkbox" id="chkPart" checked> 気化した成分を色つきの粒子で表示</label>
+    <label class="check"><input type="checkbox" id="chkSe" checked> 効果音</label>
+    <p class="note">「押して吸う」を押している間は速度が等速になります。スペースキーでも吸えます。</p>
+  </section>
+
+  <section class="panel view" aria-label="断面図">
+    <div class="tabs" role="tablist">
+      <button data-mode="temp" class="on">温度断面</button>
+      <button data-mode="shape">器具の形状</button>
+      <button data-mode="flow">気流</button>
+      <label class="scale">温度上限<select id="selTmax">
+        <option>250</option><option selected>400</option><option>800</option>
+      </select>℃</label>
+    </div>
+    <div class="stage">
+      <canvas id="cv" width="800" height="880" aria-label="ボウルと HMD の縦断面"></canvas>
+      <div class="padwrap">
+        <span class="padlabel">強</span>
+        <div id="pad" role="slider" aria-label="吸う強さ。押している間だけ吸う。上ほど強い" aria-valuemin="0" aria-valuemax="20" aria-valuenow="0" tabindex="0">
+          <div id="padFill"></div>
+          <div id="padText">押して<br>吸う</div>
+        </div>
+        <span class="padlabel">弱</span>
+        <output id="padOut">0.0 L/分</output>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel readout" aria-label="計算結果">
+    <h2>現在の状態</h2>
+    <div class="tiles">
+      <div><span>経過</span><b id="oTime">0:00</b></div>
+      <div><span>実効速度</span><b id="oSpeed">—</b></div>
+      <div><span>上層</span><b id="oTop">—</b></div>
+      <div><span>中層</span><b id="oMid">—</b></div>
+      <div><span>下層</span><b id="oBot">—</b></div>
+      <div><span>葉の最高点</span><b id="oMax">—</b></div>
+      <div><span>グリセリン（煙）</span><b id="oGly">—</b></div>
+      <div><span>炭の残量</span><b id="oFuel">—</b></div>
+    </div>
+    <p id="oState" class="state"></p>
+
+    <h2>層ごとのグリセリン残量</h2>
+    <div id="layerBars" class="bars"></div>
+
+    <h2>温度の推移</h2>
+    <canvas id="cvHist" class="chart"></canvas>
+  </section>
+
+  <section class="panel wide" aria-label="香料">
+    <h2>いま出ている成分</h2>
+    <p class="note">吸っている間に口元側へ出ていく量と、葉に残っている割合です。沸点の低い成分ほど先に出て先に尽きます。断面図の粒子は、この表の丸と同じ色でその成分が気化している場所を示します。粒子の数は成分ごとに「30分で尽きる速さ」を基準にした相対量です。</p>
+    <div class="tablewrap"><table id="tblComp">
+      <thead><tr><th>成分</th><th>香りの特徴</th><th>沸点</th><th>放出量</th><th>残量</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+  </section>
+
+  <section class="panel wide" aria-label="温度ごとの出やすさ">
+    <h2>温度ごとの出やすさ</h2>
+    <p class="note">初期配合のシロップと平衡になった空気 1 L に含まれる量（mg/L、対数軸）。縦の点線は上・中・下層の現在温度。線が上にあるほどその温度で出やすい成分です。</p>
+    <canvas id="cvVol" class="chart tall"></canvas>
+  </section>
+
+  <section class="panel wide prose" aria-label="モデルの説明">
+    <h2>計算方法と限界</h2>
+    <ul>
+      <li>器具の中心を通る縦断面を 1 mm 格子に分け、熱伝導、すき間の放射、外気への放熱、吸引時の空気による熱の運搬を計算します。</li>
+      <li>気流は、葉を通気抵抗のある層とみなした流れ（Darcy 型）を形状ごとに解き、吸う強さに比例させます。</li>
+      <li>成分の気化は、通過する空気が各セルの温度での気液平衡に近づくとして計算します。蒸気圧は沸点と蒸発エンタルピーから Clausius-Clapeyron 式で求めます。蒸発で奪われる熱も葉の温度に反映します。</li>
+      <li>断面 2D の計算を実物（円形）に換算しているため、数値は実機の測定値ではなく推定値です。炭と HMD の接触、放射の実効放射率などは、公開されている実測例に近づくよう調整した値です。</li>
+      <li>較正は ONMO HMD に炭2〜3個を載せた条件で行いました。Na Grani や炭4個相当の条件は外挿で、温度を高めに見積もっている可能性があります。</li>
+      <li>断面は下段の炭の列に直交する面です。下段2個は奥行き方向に並ぶため、断面には中央の1個分が写ります。</li>
+      <li>ボウルと HMD の形は公表寸法をもとにパラメータで作図しており、3D スキャンではありません。公表値のない寸法は仮定です（下の一覧に明記）。</li>
+      <li>各フレーバーの配合は非公開です。香気成分の種類は文献と製品説明に基づき、量は仮定です。</li>
+    </ul>
+    <h3>選択中の器具・フレーバーの根拠</h3>
+    <dl id="srcList"></dl>
+    <h3>出典</h3>
+    <ul class="links">
+      <li><a href="https://media.cloud-shisha.com/%E3%80%90%E5%AE%9F%E9%A8%93%E5%8B%95%E7%94%BB%E3%80%91%E3%82%B7%E3%83%BC%E3%82%B7%E3%83%A3%E3%81%AE%E3%83%95%E3%83%AC%E3%83%BC%E3%83%90%E3%83%BC%E3%81%A3%E3%81%A6%E4%BD%95%E2%84%83%EF%BC%9F%E6%B8%A9/">CLOUD「シーシャのフレーバーって何℃？温度計で実測してみた」</a>（上層204℃・中層142℃・下層80℃の実測例。温度の較正の目安）</li>
+      <li><a href="https://www.nature.com/articles/s41598-018-35368-6">Farag et al., Scientific Reports 2018</a>（フレーバー付き水たばこの香気成分。アップル系ではアネトールが指標成分。加熱条件は 190℃）</li>
+      <li><a href="https://www.researchgate.net/publication/248456191_Waterpipe_smoking_Analysis_of_the_aroma_profile_of_flavored_waterpipe_tobaccos">Schubert, Luch, Schulz, Talanta 2013</a>（79 種の揮発性香気成分、ベンジルアルコールが多い）</li>
+      <li><a href="https://image-ppubs.uspto.gov/dirsearch-public/print/downloadPdf/12507732">US 12507732</a>（Al Fakher double apple の組成例: 葉15〜30%、グリセリン45〜55%、糖15〜30%。目標温度 約200℃）</li>
+      <li><a href="https://shishagear.com/collections/discount-code-collection/products/cosmo-turkish-bolt-bowl">Cosmo Turkish の寸法</a>、<a href="https://thepremiumway.com.au/products/groot-white-hookah-bowl">葉室径</a>、<a href="https://thepremiumway.com.au/products/cosmo-mixology-phunnel-bowl-red">Cosmo Phunnel の寸法</a></li>
+      <li><a href="https://eggshisha.com/shopdetail/000000000373/">Hype Bowl の寸法（EGG SHISHA）</a>、<a href="https://shisha-boutique.com/product/hype-killer-light-bowl/">Hype Killer Light の寸法</a>、<a href="https://www.myhookah.ca/thicc-bowl-orange/">THICC Bowl の寸法</a></li>
+      <li><a href="https://smokedex.info/en/onmo-hmd-smokebox-aufsatz">ONMO HMD の寸法</a>、<a href="https://hookahvault.com/products/onmo-hmd">ONMO の構造</a>、<a href="https://www.texashookah.com/na-grani-hmd.html">Na Grani HMD の寸法</a></li>
+      <li><a href="https://iconhookah.com/products/darkside-doppelganger-hookah-shisha-flavor">Darkside Doppelgänger の味の説明</a></li>
+      <li><a href="https://simulator.mok.bar/">シーシャ熱流シミュレーター | MOK</a>（画面構成の参考。コード・形状データは使用していません）</li>
+    </ul>
+  </section>
+</main>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
