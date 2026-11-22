@@ -2,6 +2,7 @@ import { BOWLS, HMDS, LAYOUTS, FLAVORS, COAL_SIZES, COMPOUNDS, PUFF } from './da
 import { Sim } from './sim.js';
 import { drawSection, drawHistory, drawVolatility, compColor } from './render.js';
 import { Sfx } from './audio.js';
+import { init3d, draw3d } from './view3d.js';
 
 const $ = (id) => document.getElementById(id);
 const fill = (sel, obj, def) => {
@@ -14,7 +15,7 @@ fill($('selFlavor'), FLAVORS, 'doppelganger');
 for (const s of COAL_SIZES) $('selCoal').add(new Option(`${s} mm キューブ`, s, s === 25, s === 25));
 
 const sfx = new Sfx();
-const state = { sim: null, playing: false, mode: 'temp', pressing: false, level: 0, warmUntil: 0, acc: 0, effSpeed: 0 };
+const state = { sim: null, playing: false, mode: 'temp', view: '2d', pressing: false, level: 0, warmUntil: 0, acc: 0, effSpeed: 0 };
 
 function build() {
   const flavor = FLAVORS[$('selFlavor').value];
@@ -87,7 +88,8 @@ function frame(now) {
     const speed = state.pressing ? 1 : warming ? 200 : +$('selSpeed').value;
     state.acc = Math.min(state.acc + dtReal * speed, 60);
     const t0 = performance.now(), before = sim.time;
-    while (state.acc >= 0.2 && performance.now() - t0 < 13) {
+    const budget = warming || speed >= 60 ? 40 : 14; // 早送り中は描画を少し犠牲にして計算に回す
+    while (state.acc >= 0.2 && performance.now() - t0 < budget) {
       sim.advance(0.2, currentLpm());
       state.acc -= 0.2;
       if (warming && sim.time >= state.warmUntil) { state.acc = 0; break; }
@@ -98,7 +100,8 @@ function frame(now) {
   spT += dtReal;
   if (spT > 1) { state.effSpeed = spSim / spT; spT = 0; spSim = 0; }
   const lpm = state.playing ? currentLpm() : 0;
-  drawSection($('cv'), sim, { mode: state.mode, tmax: +$('selTmax').value, lpm, now, particles: $('chkPart').checked });
+  const opt = { mode: state.mode, tmax: +$('selTmax').value, lpm, now, particles: $('chkPart').checked };
+  if (state.view === '3d') draw3d(sim, opt); else drawSection($('cv'), sim, opt);
   sfx.update(lpm, $('chkSe').checked, sim.stats.scorchFrac > 0.15);
   pad.classList.toggle('active', lpm > 0);
   $('padFill').style.height = (lpm > 0 ? ((lpm - 0) / PUFF.maxLpm) * 100 : 0) + '%';
@@ -120,7 +123,10 @@ function refresh(force) {
   $('oBot').textContent = st.layerT[2].toFixed(0) + ' ℃';
   $('oMax').textContent = st.maxTob.toFixed(0) + ' ℃';
   $('oGly').textContent = fmtRate(sim.emit[1]);
-  $('oFuel').textContent = (Math.min(...st.fuel) * 100).toFixed(0) + ' %';
+  $('oFuel').textContent = (Math.min(...st.fuel.filter((f) => f > 0), 1) * 100).toFixed(0) + ' %';
+  $('oPower').textContent = st.power.toFixed(0) + ' W';
+  $('oHmd').textContent = st.hmdFloorT.toFixed(0) + ' ℃';
+  drawCoals(st);
   for (let l = 0; l < 3; l++) {
     $('lb' + l).style.width = Math.min(100, st.layerGly[l] * 100) + '%';
     $('lt' + l).textContent = (st.layerGly[l] * 100).toFixed(0) + '%';
@@ -143,13 +149,41 @@ function refresh(force) {
   if (force || t % 2 === 0) drawVolatility($('cvVol'), sim);
 }
 
+// ---- 炭の一覧 ----
+const ROLE = { lower: '下段', pyr: '上（ピラミッド）', diag: '斜めがけ' };
+function drawCoals(st) {
+  $('coalList').innerHTML = st.coals.map((c) => {
+    const name = ROLE[c.role] + (c.role === 'lower' && c.n === 2 ? '×2' : c.role === 'diag' ? (c.side > 0 ? '（右）' : '（左）') : '');
+    if (c.dead) return `<tr><td>${name}</td><td colspan="5">燃え尽きた</td></tr>`;
+    return `<tr><td>${name}</td><td class="num">${c.Tc.toFixed(0)}/${c.Ts.toFixed(0)}℃</td><td class="num">${c.s.toFixed(1)} mm</td><td class="num">${c.a.toFixed(1)} mm</td><td class="num">${c.q.toFixed(0)} W</td><td class="num">${(c.fuel * 100).toFixed(0)}%</td></tr>`;
+  }).join('');
+}
+
 // ---- 操作 ----
-for (const id of ['selBowl', 'selHmd', 'selLayout', 'selCoal', 'selFlavor']) $(id).addEventListener('change', () => { sfx.click(); build(); });
+for (const id of ['selBowl', 'selHmd', 'selCoal', 'selFlavor']) $(id).addEventListener('change', () => { sfx.click(); build(); });
+// 配置は途中で変えられる（今ある炭の温度・大きさ・灰を引き継ぐ）
+$('selLayout').addEventListener('change', () => {
+  sfx.click();
+  if (state.sim.time < 1) build(); else { state.sim.setLayout(LAYOUTS[$('selLayout').value]); refresh(true); }
+});
+$('btnAsh').addEventListener('click', () => { sfx.click(); state.sim.knockAsh(); refresh(true); });
+$('btnSwap').addEventListener('click', () => { sfx.click(); if (!state.sim.swapCoals()) alert('上段の炭がない配置では入れ替えられません'); refresh(true); });
+$('btnNew').addEventListener('click', () => { sfx.click(); state.sim.replaceCoals(); refresh(true); });
+document.querySelectorAll('.views button').forEach((b) => b.addEventListener('click', async () => {
+  document.querySelectorAll('.views button').forEach((x) => x.classList.toggle('on', x === b));
+  state.view = b.dataset.view;
+  if (state.view === '3d') {
+    try { await init3d($('cv3d')); } catch (e) { $('view3dMsg').textContent = '3D 表示を読み込めませんでした: ' + e.message; }
+  }
+  $('cv').hidden = state.view === '3d';
+  $('cv3d').hidden = state.view !== '3d';
+  $('view3dMsg').hidden = state.view !== '3d';
+}));
 $('btnPlay').addEventListener('click', () => { sfx.unlock(); sfx.click(); togglePlay(); });
 $('btnReset').addEventListener('click', () => { sfx.click(); togglePlay(false); build(); });
 $('btnWarm').addEventListener('click', () => { sfx.unlock(); sfx.click(); state.warmUntil = state.sim.time + 300; togglePlay(true); });
-document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('click', () => {
-  document.querySelectorAll('.tabs button').forEach((x) => x.classList.toggle('on', x === b));
+document.querySelectorAll('.tabs .modes button').forEach((b) => b.addEventListener('click', () => {
+  document.querySelectorAll('.tabs .modes button').forEach((x) => x.classList.toggle('on', x === b));
   state.mode = b.dataset.mode;
 }));
 window.addEventListener('resize', () => refresh(true));
