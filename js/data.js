@@ -10,21 +10,40 @@ export const M = {
 };
 
 // k: 熱伝導率 W/mK, rhoc: 体積熱容量 J/m3K, perm: 通気のしやすさ(相対), eps: 放射率
-// アルミは陽解法の時間刻みを確保するため熱拡散率を 2.5e-5 m2/s に抑えている（実物は約 9.7e-5）。
+// アルミは陽解法の時間刻みを確保するため熱伝導率を 100 W/mK に抑えている（6061 合金の実物は約 167）。
+// perm は開いた空間を 1 とした相対値。詰めた葉は開いた空間より桁違いに通気抵抗が大きいので 1/500 にしている。
+// 炭は塊ごとに1つの温度で扱う（sim.js）。格子上の炭セルの値は表示と周囲との境界条件にだけ使う。
 export const MATERIALS = [
   { name: '外気', k: 0.03, rhoc: 1200, perm: 1, eps: 1, color: '#12141c' },
-  { name: '空気(器具内)', k: 0.03, rhoc: 1200, perm: 1, eps: 0.8, color: '#27304a' },
+  { name: '空気(器具内)', k: 0.03, rhoc: 1200, perm: 1, eps: 0, color: '#27304a' },
   { name: '陶器(クレイ)', k: 1.0, rhoc: 1.9e6, perm: 0, eps: 0.9, color: '#a8623f' },
   { name: '炻器(ストーンウェア)', k: 1.4, rhoc: 2.1e6, perm: 0, eps: 0.9, color: '#6f6a66' },
-  { name: 'アルミ', k: 60, rhoc: 2.43e6, perm: 0, eps: 0.6, color: '#b9c0c9' },
+  { name: 'アルミ', k: 100, rhoc: 2.43e6, perm: 0, eps: 0.8, color: '#b9c0c9' },
   { name: 'ステンレス', k: 16, rhoc: 3.9e6, perm: 0, eps: 0.5, color: '#8d97a6' },
-  { name: '葉(フレーバー)', k: 0.2, rhoc: 1.1e6, perm: 0.03, eps: 0.9, color: '#5d7a2c' },
-  { name: '炭', k: 3, rhoc: 0.9e6, perm: 0, eps: 0.75, color: '#e2531f' },
+  { name: '葉(フレーバー)', k: 0.2, rhoc: 1.1e6, perm: 0.002, eps: 0.9, color: '#5d7a2c' },
+  { name: '炭', k: 0.8, rhoc: 1.16e6, perm: 0, eps: 0.85, color: '#e2531f' },
   // 穴・スリットのある部分: 断面では穴に見えるが、実物は穴の周りで金属がつながっているので
   // 「熱を伝え、空気も通す」セルとして扱う。
-  { name: 'アルミ(穴・スリット)', k: 30, rhoc: 1.4e6, perm: 0.3, eps: 0.6, color: '#59616e' },
-  { name: 'ステンレス(穴)', k: 8, rhoc: 2.2e6, perm: 0.3, eps: 0.5, color: '#4d5561' },
+  { name: 'アルミ(穴・スリット)', k: 50, rhoc: 1.4e6, perm: 0.1, eps: 0.8, color: '#59616e' },
+  { name: 'ステンレス(穴)', k: 8, rhoc: 2.2e6, perm: 0.1, eps: 0.5, color: '#4d5561' },
 ];
+
+// ---- 炭（ココナッツキューブ）の物性 ----
+// 公表値が揃っていないので、販売単位と一般的な文献値から置いた値。
+export const COAL = {
+  density: 890, // kg/m3。25 mm キューブが 1 kg あたり72個前後で売られていることからの換算（仮定）
+  hhv: 29e6, // J/kg。ココナッツ殻炭ブリケットの高位発熱量 28〜30 MJ/kg の中央（一般的な文献値）
+  cp: 1300, // J/kgK。高温の炭（チャー）の比熱
+  kChar: 0.8, // W/mK。炭の芯の有効熱伝導率（仮定）
+  o2Heat: 13.1e6, // J/kg-O2。消費した酸素あたりの発熱量（Thornton 則。有機物の燃焼でほぼ一定）
+  yO2: 0.233, // 空気中の酸素の質量分率
+  src: '発熱量はココナッツ殻炭の文献値 28〜30 MJ/kg。燃焼速度は表面への酸素の拡散で決まるとし、発熱は消費酸素量から Thornton 則（13.1 MJ/kg-O2）で求める。',
+  assumed: '密度・灰の体積・灰の熱伝導率と酸素の通りやすさは仮定（sim.js の TUNE）。',
+};
+
+// 水の活量（Norrish 式）: ln aw = ln xw − (Σ √K_i x_i)²。K は溶質ごとの定数。
+// グリセリン 1.16、ブドウ糖・果糖 2.25（Norrish 1966、食品の水分活性の標準的な値）。シーシャの糖は転化糖として扱う。
+export const NORRISH = { glycerol: 1.16, sugar: 2.25 };
 
 // ---- ボウル（単位 mm。z=0 がリム上面、下向きが負）----
 // Ro: リム外半径, RiTop/RiBot: 葉室の内半径(上端/底), depth: 葉室の深さ, tb: 底板の厚さ
@@ -32,7 +51,7 @@ export const BOWLS = {
   cosmoTurkish: {
     name: 'Cosmo Bowl Turkish', type: 'turkish', mat: M.CLAY,
     Ro: 34, RiTop: 28, RiBot: 24, depth: 16, tb: 5,
-    holes: { center: true, ringR: 11, d: 5 },
+    holes: { center: true, ringR: 11, d: 5, n: 5 },
     capacity: '15〜18 g',
     src: '外径約68 mm・葉室径約56 mm・高さ約85 mm（販売店記載）。中央1穴＋周囲5穴は参考サイトの記載。',
     assumed: '葉室の深さ16 mm、底板厚、穴径は仮定。',
@@ -48,7 +67,7 @@ export const BOWLS = {
   hypeTurkish: {
     name: 'Hype Bowl (Turkish)', type: 'turkish', mat: M.CLAY,
     Ro: 36.5, RiTop: 29, RiBot: 25, depth: 15, tb: 5,
-    holes: { center: true, ringR: 10, d: 4.5 },
+    holes: { center: true, ringR: 10, d: 4.5, n: 5 },
     capacity: '12〜15 g',
     src: '幅約73 mm・高さ約75 mm・デポット約15 mm・容量12〜15 g（EGG SHISHA 記載）。',
     assumed: '穴の数と配置、内径は仮定。',
@@ -56,7 +75,7 @@ export const BOWLS = {
   hypeKiller: {
     name: 'Hype Killer Light', type: 'killer', mat: M.CLAY,
     Ro: 36.5, RiTop: 29, RiBot: 25, depth: 18, tb: 5,
-    holes: { center: false, ringR: 13, d: 6 }, dome: { r: 6, h: 4 },
+    holes: { center: false, ringR: 13, d: 6, n: 6 }, dome: { r: 6, h: 4 },
     capacity: '約15〜18 g',
     src: '外径73 mm・深さ18 mm・6穴・重量250 g（販売店記載）。',
     assumed: '穴の配置半径と中央の盛り上がりは「キラー型」の一般形状からの仮定。',
@@ -64,7 +83,7 @@ export const BOWLS = {
   thiccKiller: {
     name: 'Thicc Bowl Killer', type: 'killer', mat: M.STONEWARE,
     Ro: 37.5, RiTop: 28, RiBot: 25, depth: 18, tb: 7,
-    holes: { center: false, ringR: 12, d: 6 }, dome: { r: 6, h: 4 },
+    holes: { center: false, ringR: 12, d: 6, n: 6 }, dome: { r: 6, h: 4 },
     capacity: '18〜20 g',
     src: 'BSTD THICC Bowl: 高さ約90 mm・幅約75 mm・容量18〜20 g・炻器（販売店記載）。',
     assumed: 'Killer 版の寸法は公表値が見つからず、THICC Bowl の外寸にキラー型の底形状を当てはめた。',
@@ -74,26 +93,29 @@ export const BOWLS = {
 // ---- HMD（単位 mm。z=0 がボウルのリムに載る面）----
 export const HMDS = {
   onmo: {
-    name: 'ONMO HMD', mat: M.ALU, epsRel: 1, // アルマイト処理のアルミ: 放射率が高い
+    name: 'ONMO HMD', mat: M.ALU, eps: 0.8, // アルマイト処理のアルミ: 放射率が高い
     Rin: 30, wall: 3, height: 30, floorT: 2.5, flangeR: 37.5, flangeT: 3,
-    floorHoles: { xs: [0, 12, 24], w: 3 },
+    // 床はバー（格子）形状: 奥行き方向に走るスロットとリブ
+    floorHoles: { type: 'slots', xs: [0, 12, 24], w: 3 },
     ribs: { xs: [6, 18], w: 2, h: 1.5 },
-    slits: { z0: 10, z1: 22 },
+    slits: { z0: 10, z1: 22, n: 12, w: 3 },
     src: 'アルミ削り出し・底径75 mm・高さ約30 mm・上部幅約66 mm・27 mmまでの炭2個・内側はバー形状・側面スリット（販売店記載）。',
-    assumed: '床穴の位置と幅、壁厚は仮定。蓋は外した状態で計算する。',
+    assumed: '床のスロットの位置と幅、側面スリットの本数（12本）と幅、壁厚は仮定。蓋は外した状態で計算する。',
   },
   nagrani: {
-    name: 'Na Grani V2', mat: M.STEEL, epsRel: 0.6, // 酸化したステンレス: アルマイトより放射率が低い
+    name: 'Na Grani V2', mat: M.STEEL, eps: 0.5, // 酸化したステンレス: アルマイトより放射率が低い
     Rin: 28, wall: 1.5, height: 25.5, floorT: 1.5, flangeR: 37, flangeT: 1.5,
-    floorHoles: { xs: [0, 8, 16, 24], w: 2.5 },
+    // 丸穴を同心円状に並べる: 半径 [0, 8, 16, 24] mm に [1, 6, 12, 18] 個
+    floorHoles: { type: 'rings', rs: [0, 8, 16, 24], ns: [1, 6, 12, 18], d: 2.5 },
     ribs: null, slits: null,
     src: 'ステンレス一体型・底径74 mm・内径56 mm・深さ24 mm・120 g・オープントップ（販売店記載）。',
-    assumed: 'V2 固有の寸法は公表値が見つからず Na Grani の公表寸法を使用。床穴の配置は仮定。',
+    assumed: 'V2 固有の寸法は公表値が見つからず Na Grani の公表寸法を使用。床穴の配置と数は仮定。',
   },
 };
 
 // ---- 炭（キューブ）と配置 ----
 export const COAL_SIZES = [22, 25, 26, 27, 28];
+// lower: 下段の個数（2個は奥行き方向に並ぶ）, diag: 縁に斜めがけする個数, pyramid: 下段の上に載せる個数
 export const LAYOUTS = {
   l2d2: { name: '下2・上斜めがけ2', lower: 2, diag: 2, pyramid: 0 },
   l2d1: { name: '下2・上斜めがけ1', lower: 2, diag: 1, pyramid: 0 },
