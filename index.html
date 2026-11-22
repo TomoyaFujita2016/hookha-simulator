@@ -6,11 +6,12 @@
 <title>シーシャ熱・香りシミュレーター</title>
 <meta name="description" content="ボウルと HMD の断面形状、炭の配置、吸う強さから、葉の上・中・下層の温度と香料の気化をシミュレーションします。">
 <link rel="stylesheet" href="css/style.css">
+<script type="importmap">{"imports": {"three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
 </head>
 <body>
 <header>
   <h1>シーシャ熱・香りシミュレーター</h1>
-  <p>ボウルと HMD の断面、炭の配置、吸う強さから、葉の上・中・下層の温度と、温度ごとに出てくる香料を計算します。</p>
+  <p>ボウルと HMD の 3D 形状、炭の配置と燃え方、吸う強さから、葉の上・中・下層の温度と、温度ごとに出てくる香料を計算します。</p>
 </header>
 
 <main>
@@ -19,7 +20,7 @@
     <label>ボウル<select id="selBowl"></select></label>
     <label>HMD<select id="selHmd"></select></label>
     <label>炭の配置<select id="selLayout"></select></label>
-    <label>炭のサイズ<select id="selCoal"></select></label>
+    <label>炭のサイズ（新しい炭）<select id="selCoal"></select></label>
     <label>フレーバー<select id="selFlavor"></select></label>
     <p class="note" id="flavorDesc"></p>
 
@@ -36,19 +37,28 @@
     <label class="check"><input type="checkbox" id="chkPart" checked> 気化した成分を色つきの粒子で表示</label>
     <label class="check"><input type="checkbox" id="chkSe" checked> 効果音</label>
     <p class="note">「押して吸う」を押している間は速度が等速になります。スペースキーでも吸えます。</p>
+
+    <h2>炭の操作</h2>
+    <button id="btnAsh">灰を落とす</button>
+    <button id="btnSwap">上段と下段の炭を入れ替える</button>
+    <button id="btnNew">新しい炭に替える</button>
+    <p class="note">「炭の配置」は途中で変えると、今ある炭の温度・大きさ・灰を引き継いで置き直します。足りない分は新しい炭を足し、余った分は外します。</p>
   </section>
 
   <section class="panel view" aria-label="断面図">
     <div class="tabs" role="tablist">
-      <button data-mode="temp" class="on">温度断面</button>
-      <button data-mode="shape">器具の形状</button>
-      <button data-mode="flow">気流</button>
+      <span class="views"><button data-view="2d" class="on">断面</button><button data-view="3d">3D</button></span>
+      <span class="modes"><button data-mode="temp" class="on">温度</button><button data-mode="shape">器具の形状</button><button data-mode="flow">気流</button></span>
       <label class="scale">温度上限<select id="selTmax">
         <option>250</option><option selected>400</option><option>800</option>
       </select>℃</label>
     </div>
     <div class="stage">
-      <canvas id="cv" width="800" height="880" aria-label="ボウルと HMD の縦断面"></canvas>
+      <div class="cvwrap">
+        <canvas id="cv" width="800" height="880" aria-label="ボウルと HMD の縦断面"></canvas>
+        <canvas id="cv3d" hidden aria-label="ボウルと HMD の 3D 表示（中心で半分に切った状態）"></canvas>
+        <p id="view3dMsg" class="note" hidden>中心で半分に切った状態です。ドラッグで回転、ホイールで拡大します。気流の矢印と粒子は断面表示でだけ出ます。</p>
+      </div>
       <div class="padwrap">
         <span class="padlabel">強</span>
         <div id="pad" role="slider" aria-label="吸う強さ。押している間だけ吸う。上ほど強い" aria-valuemin="0" aria-valuemax="20" aria-valuenow="0" tabindex="0">
@@ -71,9 +81,17 @@
       <div><span>下層</span><b id="oBot">—</b></div>
       <div><span>葉の最高点</span><b id="oMax">—</b></div>
       <div><span>グリセリン（煙）</span><b id="oGly">—</b></div>
-      <div><span>炭の残量</span><b id="oFuel">—</b></div>
+      <div><span>炭の残量（最小）</span><b id="oFuel">—</b></div>
+      <div><span>炭の発熱（合計）</span><b id="oPower">—</b></div>
+      <div><span>HMD 床</span><b id="oHmd">—</b></div>
     </div>
     <p id="oState" class="state"></p>
+
+    <h2>炭の状態</h2>
+    <div class="tablewrap"><table class="coals">
+      <thead><tr><th>位置</th><th>芯/表面</th><th>芯の一辺</th><th>灰の殻</th><th>発熱</th><th>残量</th></tr></thead>
+      <tbody id="coalList"></tbody>
+    </table></div>
 
     <h2>層ごとのグリセリン残量</h2>
     <div id="layerBars" class="bars"></div>
@@ -100,12 +118,11 @@
   <section class="panel wide prose" aria-label="モデルの説明">
     <h2>計算方法と限界</h2>
     <ul>
-      <li>器具の中心を通る縦断面を 1 mm 格子に分け、熱伝導、すき間の放射、外気への放熱、吸引時の空気による熱の運搬を計算します。</li>
-      <li>気流は、葉を通気抵抗のある層とみなした流れ（Darcy 型）を形状ごとに解き、吸う強さに比例させます。</li>
-      <li>成分の気化は、通過する空気が各セルの温度での気液平衡に近づくとして計算します。蒸気圧は沸点と蒸発エンタルピーから Clausius-Clapeyron 式で求めます。蒸発で奪われる熱も葉の温度に反映します。</li>
-      <li>断面 2D の計算を実物（円形）に換算しているため、数値は実機の測定値ではなく推定値です。炭と HMD の接触、放射の実効放射率などは、公開されている実測例に近づくよう調整した値です。</li>
-      <li>較正は ONMO HMD に炭2〜3個を載せた条件で行いました。Na Grani や炭4個相当の条件は外挿で、温度を高めに見積もっている可能性があります。</li>
-      <li>断面は下段の炭の列に直交する面です。下段2個は奥行き方向に並ぶため、断面には中央の1個分が写ります。</li>
+      <li>ボウル・HMD・炭を 2 mm 格子の 3D で組み立て、中心の縦断面について対称な半分を計算します。「断面」は中心の面、「3D」は半分に切った全体を表示します。</li>
+      <li>熱伝導、面どうしの放射（光線で求めた形態係数）、外気への対流・放射、吸引時の空気による熱の運搬を計算します。</li>
+      <li>炭は塊ごとに芯の温度・大きさ・灰の殻の厚さを持ちます。燃える速さは表面に届く酸素の量で決まり、灰の殻が厚くなると火力が落ちます。灰を落とすと戻りますが、炭は小さくなったままです。</li>
+      <li>成分の気化は、通過する空気が各セルの温度での気液平衡に近づくとして計算します。水の活量は Norrish 式で求め、シロップ側の拡散抵抗も入れています。吸っていない間も、沸点を超えた分は沸騰し、表面からも蒸発します。</li>
+      <li>吸うと上層が下がって吸い終わると戻る傾向は、公開されている実測に合わせて調整しました。蒸らし中の上層の温度は実測より高めに出ます（README の「較正」）。</li>
       <li>ボウルと HMD の形は公表寸法をもとにパラメータで作図しており、3D スキャンではありません。公表値のない寸法は仮定です（下の一覧に明記）。</li>
       <li>各フレーバーの配合は非公開です。香気成分の種類は文献と製品説明に基づき、量は仮定です。</li>
     </ul>
@@ -114,6 +131,11 @@
     <h3>出典</h3>
     <ul class="links">
       <li><a href="https://media.cloud-shisha.com/%E3%80%90%E5%AE%9F%E9%A8%93%E5%8B%95%E7%94%BB%E3%80%91%E3%82%B7%E3%83%BC%E3%82%B7%E3%83%A3%E3%81%AE%E3%83%95%E3%83%AC%E3%83%BC%E3%83%90%E3%83%BC%E3%81%A3%E3%81%A6%E4%BD%95%E2%84%83%EF%BC%9F%E6%B8%A9/">CLOUD「シーシャのフレーバーって何℃？温度計で実測してみた」</a>（上層204℃・中層142℃・下層80℃の実測例。温度の較正の目安）</li>
+      <li><a href="https://note.com/wktera/n/ne480048480ea">シナモン佐藤「ヒートマネジメントの性能考察」</a>（HMD 8機種の層別温度。Cosmo Bowl Turkish・26 mm×4 個）</li>
+      <li><a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC7546025">Perraud et al., Aerosol Sci Technol 2019</a>（ココナッツ炭3個。吸うたびにヘッド内温度が約50℃下がる）</li>
+      <li><a href="http://www.hookahpro.ru/index.php?showtopic=8937">hookahpro.ru「Термопара: результаты измерений」</a>（吸ったときの葉の温度変化、灰を落としたときの HMD 表面温度）</li>
+      <li><a href="https://note.com/hookah_in_japan/n/n8f7e6be69a23">シシャニキ「シーシャのフレーバーの温度を測ってみてる話」</a>（上層・下層の長時間の温度記録）</li>
+      <li><a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC7493644">Edwards et al., Tob Prev Cessat 2020</a>（Beirut 法での葉と炭の下の温度）</li>
       <li><a href="https://www.nature.com/articles/s41598-018-35368-6">Farag et al., Scientific Reports 2018</a>（フレーバー付き水たばこの香気成分。アップル系ではアネトールが指標成分。加熱条件は 190℃）</li>
       <li><a href="https://www.researchgate.net/publication/248456191_Waterpipe_smoking_Analysis_of_the_aroma_profile_of_flavored_waterpipe_tobaccos">Schubert, Luch, Schulz, Talanta 2013</a>（79 種の揮発性香気成分、ベンジルアルコールが多い）</li>
       <li><a href="https://image-ppubs.uspto.gov/dirsearch-public/print/downloadPdf/12507732">US 12507732</a>（Al Fakher double apple の組成例: 葉15〜30%、グリセリン45〜55%、糖15〜30%。目標温度 約200℃）</li>

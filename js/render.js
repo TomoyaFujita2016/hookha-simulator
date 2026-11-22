@@ -1,6 +1,7 @@
 // 断面図・グラフの描画
 import { M, MATERIALS, COMPOUNDS, AMBIENT_C } from './data.js';
 import { equilibriumCurve } from './sim.js';
+import { GRID, D, deviceMaterial, coalPart, cellX, cellZ, ixOf, iyOf, izOf } from './geometry.js';
 
 const STOPS = [
   [0.0, [14, 18, 48]], [0.15, [52, 34, 120]], [0.35, [140, 40, 110]], [0.55, [214, 76, 52]],
@@ -19,32 +20,89 @@ const MAT_RGB = MATERIALS.map((m) => hex(m.color));
 const BG = [13, 15, 22];
 
 const groupOf = (m) => (m === M.AMBIENT ? 0 : m === M.AIR ? 1 : m === M.CLAY || m === M.STONEWARE ? 2 : m === M.TOBACCO ? 4 : m === M.COAL ? 5 : 3);
+const ASH_RGB = [150, 146, 140];
+
+// 断面図は y=0（中心を通る縦断面）を 1 mm の解像度で描く。形は器具の式から直接求め、温度は 3D 格子の
+// 中心の面（iy=1）から同じ材質のセルどうしで補間する。
+const DW = 100, DH = 110;
+const pxX = (i) => i - DW / 2 + 0.5, pxZ = (j) => GRID.zTop - j - 0.5;
+let disp = null;
+function displayMap(sim) {
+  if (disp && disp.sim === sim) return disp;
+  const mat = new Uint8Array(DW * DH);
+  for (let j = 0; j < DH; j++) for (let i = 0; i < DW; i++) {
+    mat[j * DW + i] = i === 0 || i === DW - 1 || j === 0 ? M.AMBIENT : deviceMaterial(sim.bowl, sim.hmd, pxX(i), 0.5, pxZ(j));
+  }
+  // 層（3D 側の葉セルの z 範囲で 3 等分）
+  const lb = sim.st.layerBounds;
+  disp = { sim, mat, cur: new Uint8Array(DW * DH), part: new Uint8Array(DW * DH), cid: new Int8Array(DW * DH), lb };
+  return disp;
+}
+// 炭の重ね描き（毎フレーム）
+function overlayDisplay(sim, d) {
+  d.cur.set(d.mat); d.part.fill(0); d.cid.fill(-1);
+  sim.coals.forEach((c, id) => {
+    if (c.dead) return;
+    for (let j = 1; j < DH; j++) for (let i = 1; i < DW - 1; i++) {
+      const k = j * DW + i, m = d.cur[k];
+      if (m !== M.AIR && m !== M.AMBIENT) continue;
+      const p = coalPart(c, pxX(i), 0.5, pxZ(j));
+      if (p) { d.cur[k] = M.COAL; d.part[k] = p; d.cid[k] = id; }
+    }
+  });
+}
+const cellOf = (x, z) => {
+  const ix = Math.max(0, Math.min(GRID.NX - 1, Math.floor((x - GRID.x0) / D)));
+  const iz = Math.max(0, Math.min(GRID.NZ - 1, Math.floor((GRID.zTop - z) / D)));
+  return ix + GRID.NX * (1 + GRID.NY * iz);
+};
+function pixelT(sim, d, k) {
+  const m = d.cur[k];
+  if (m === M.COAL) { const c = sim.coals[d.cid[k]]; return d.part[k] === 2 ? c.Tc : c.Ts; }
+  const i = k % DW, j = (k / DW) | 0;
+  const x = pxX(i), z = pxZ(j);
+  const gx = (x - GRID.x0) / D - 0.5, gz = (GRID.zTop - z) / D - 0.5;
+  const ix0 = Math.floor(gx), iz0 = Math.floor(gz), fx = gx - ix0, fz = gz - iz0;
+  const g = groupOf(m);
+  let sw = 0, st = 0;
+  for (let a = 0; a < 2; a++) for (let b = 0; b < 2; b++) {
+    const ix = ix0 + a, iz = iz0 + b;
+    if (ix < 0 || ix >= GRID.NX || iz < 0 || iz >= GRID.NZ) continue;
+    const ci = ix + GRID.NX * (1 + GRID.NY * iz);
+    if (groupOf(sim.mat[ci]) !== g) continue;
+    const w = (a ? fx : 1 - fx) * (b ? fz : 1 - fz) + 1e-6;
+    sw += w; st += w * sim.T[ci];
+  }
+  return sw > 0 ? st / sw : sim.T[cellOf(x, z)];
+}
 
 let off = null;
 export function drawSection(canvas, sim, opt) {
-  const g = sim.g, { W, H, mat } = g;
+  const d = displayMap(sim);
+  overlayDisplay(sim, d);
+  const W = DW, H = DH, mat = d.cur;
   const ctx = canvas.getContext('2d');
   const px = canvas.width / W;
   if (!off || off.width !== W || off.height !== H) { off = document.createElement('canvas'); off.width = W; off.height = H; }
   const octx = off.getContext('2d');
   const img = octx.createImageData(W, H);
-  const d = img.data, T = sim.T;
+  const data = img.data;
   const span = opt.tmax - 20;
-  for (let i = 0; i < g.N; i++) {
-    const m = mat[i];
+  for (let k = 0; k < W * H; k++) {
+    const m = mat[k];
     let r, gg, b;
     if (m === M.AMBIENT) [r, gg, b] = BG;
     else if (opt.mode === 'temp') {
-      let u = (T[i] - 20) / span;
+      let u = (pixelT(sim, d, k) - 20) / span;
       u = u < 0 ? 0 : u > 1 ? 1 : u;
       const q = Math.round(u * 255) * 3;
       r = LUT[q]; gg = LUT[q + 1]; b = LUT[q + 2];
+      if (m === M.COAL && d.part[k] === 1) { r = r * 0.55 + ASH_RGB[0] * 0.45; gg = gg * 0.55 + ASH_RGB[1] * 0.45; b = b * 0.55 + ASH_RGB[2] * 0.45; }
     } else {
-      [r, gg, b] = MAT_RGB[m];
+      [r, gg, b] = m === M.COAL && d.part[k] === 1 ? ASH_RGB : MAT_RGB[m];
       if (opt.mode === 'flow') { r = r * 0.45; gg = gg * 0.45; b = b * 0.45; }
-      if (m === M.TOBACCO && opt.mode === 'shape') { const s = 1 - 0.12 * g.layer[i]; r *= s; gg *= s; b *= s; }
     }
-    d[i * 4] = r; d[i * 4 + 1] = gg; d[i * 4 + 2] = b; d[i * 4 + 3] = 255;
+    data[k * 4] = r; data[k * 4 + 1] = gg; data[k * 4 + 2] = b; data[k * 4 + 3] = 255;
   }
   octx.putImageData(img, 0, 0);
   ctx.imageSmoothingEnabled = false;
@@ -54,40 +112,39 @@ export function drawSection(canvas, sim, opt) {
   ctx.strokeStyle = 'rgba(10,12,18,0.75)';
   ctx.lineWidth = Math.max(1, px * 0.18);
   ctx.beginPath();
-  for (let i = 0; i < g.N; i++) if (mat[i] >= M.ALU_PERF) {
-    const x = (i % W) * px, y = Math.floor(i / W) * px;
+  for (let k = 0; k < W * H; k++) if (mat[k] >= M.ALU_PERF) {
+    const x = (k % W) * px, y = Math.floor(k / W) * px;
     ctx.moveTo(x + px * 0.5, y); ctx.lineTo(x + px * 0.5, y + px);
   }
   ctx.stroke();
 
-  // 輪郭（炭は1個ずつ分ける）
-  const group = (idx) => (mat[idx] === M.COAL ? 10 + g.coalId[idx] : groupOf(mat[idx]));
+  // 輪郭（炭は1個ずつ、芯と灰も分ける）
+  const group = (k) => (mat[k] === M.COAL ? 10 + d.cid[k] * 2 + d.part[k] : groupOf(mat[k]));
   ctx.strokeStyle = opt.mode === 'temp' ? 'rgba(255,255,255,0.42)' : 'rgba(255,255,255,0.3)';
   ctx.lineWidth = 1;
   ctx.beginPath();
   for (let j = 0; j < H - 1; j++) for (let i = 0; i < W - 1; i++) {
-    const idx = j * W + i, a = group(idx);
-    if (a !== group(idx + 1)) { ctx.moveTo((i + 1) * px, j * px); ctx.lineTo((i + 1) * px, (j + 1) * px); }
-    if (a !== group(idx + W)) { ctx.moveTo(i * px, (j + 1) * px); ctx.lineTo((i + 1) * px, (j + 1) * px); }
+    const k = j * W + i, a = group(k);
+    if (a !== group(k + 1)) { ctx.moveTo((i + 1) * px, j * px); ctx.lineTo((i + 1) * px, (j + 1) * px); }
+    if (a !== group(k + W)) { ctx.moveTo(i * px, (j + 1) * px); ctx.lineTo((i + 1) * px, (j + 1) * px); }
   }
   ctx.stroke();
 
-  // 気流の矢印
+  // 気流の矢印（3D 格子の中心面の流れ。x と z の成分）
   if (opt.mode === 'flow') {
     const fl = sim.flow;
     let vmax = 0;
-    for (const idx of g.tob) vmax = Math.max(vmax, Math.hypot(fl.vx[idx], fl.vz[idx]));
+    for (const i of sim.st.tob) if (iyOf(i) === 1) vmax = Math.max(vmax, Math.hypot(fl.vx[i], fl.vz[i]));
     const phase = (opt.now / 600) % 1;
     const alpha = opt.lpm > 0 ? 1 : 0.35;
     ctx.lineWidth = Math.max(1, px * 0.16);
-    for (let j = 2; j < H - 1; j += 3) for (let i = 2; i < W - 1; i += 3) {
-      const idx = j * W + i;
-      if (mat[idx] === M.AMBIENT && fl.vx[idx] === 0 && fl.vz[idx] === 0) continue;
-      const vx = fl.vx[idx], vz = fl.vz[idx], v = Math.hypot(vx, vz);
-      if (v < vmax * 0.03) continue;
+    for (let iz = 1; iz < GRID.NZ; iz++) for (let ix = 1; ix < GRID.NX - 1; ix++) {
+      const i = ix + GRID.NX * (1 + GRID.NY * iz);
+      const vx = fl.vx[i], vz = fl.vz[i], v = Math.hypot(vx, vz);
+      if (!(v > vmax * 0.03)) continue;
       const len = px * Math.min(3.2, 0.9 + 1.6 * Math.sqrt(v / vmax));
       const ux = vx / v, uz = vz / v;
-      const cx = (i + 0.5) * px, cy = (j + 0.5) * px;
+      const cx = (cellX(ix) + DW / 2) * px, cy = (GRID.zTop - cellZ(iz)) * px;
       const sh = opt.lpm > 0 ? (phase - 0.5) * px * 1.5 : 0;
       const x0 = cx - ux * len / 2 + ux * sh, y0 = cy - uz * len / 2 + uz * sh;
       const x1 = x0 + ux * len, y1 = y0 + uz * len;
@@ -103,7 +160,7 @@ export function drawSection(canvas, sim, opt) {
   if (opt.particles) drawParticles(ctx, sim, opt, px);
 
   // 層の境界と温度ラベル
-  const zy = (z) => (g.zTop - z) * px;
+  const zy = (z) => (GRID.zTop - z) * px;
   const st = sim.stats;
   const fs = Math.round(px * 2.3);
   ctx.font = `600 ${fs}px system-ui, sans-serif`;
@@ -113,13 +170,13 @@ export function drawSection(canvas, sim, opt) {
   ctx.strokeStyle = 'rgba(255,255,255,0.55)';
   const xr = (W / 2 + sim.bowl.RiTop) * px;
   for (let l = 1; l < 3; l++) {
-    const y = zy(g.layerBounds[l]);
+    const y = zy(d.lb[l]);
     ctx.beginPath(); ctx.moveTo((W / 2 - sim.bowl.RiTop) * px, y); ctx.lineTo(xr, y); ctx.stroke();
   }
   ctx.setLineDash([]);
   ctx.textAlign = 'right';
   for (let l = 0; l < 3; l++) {
-    const y = zy((g.layerBounds[l] + g.layerBounds[l + 1]) / 2);
+    const y = zy((d.lb[l] + d.lb[l + 1]) / 2);
     ctx.strokeStyle = 'rgba(255,255,255,0.5)';
     ctx.beginPath(); ctx.moveTo(xr - px * 2, y); ctx.lineTo(canvas.width - px * 15.5, y); ctx.stroke();
     ctx.fillStyle = '#fff';
@@ -129,8 +186,9 @@ export function drawSection(canvas, sim, opt) {
   ctx.textAlign = 'left';
   ctx.fillStyle = '#fff';
   ctx.fillText(`HMD床 ${st.hmdFloorT.toFixed(0)}℃`, px * 0.8, zy(sim.hmd.floorT / 2));
-  ctx.fillText(`下段の炭 ${st.coalT.toFixed(0)}℃`, px * 0.8, zy(sim.hmd.floorT + 16));
-  if (sim.layout.lower === 2) { ctx.font = `${Math.round(px * 1.8)}px system-ui, sans-serif`; ctx.fillText('（奥行き方向に2個）', px * 0.8, zy(sim.hmd.floorT + 12.5)); }
+  ctx.fillText(`下段の炭 ${st.coalT.toFixed(0)}℃（表面 ${st.coalSurfT.toFixed(0)}℃）`, px * 0.8, zy(sim.hmd.floorT + 16));
+  const lower = sim.coals.find((c) => c.role === 'lower');
+  if (lower && lower.n === 2) { ctx.font = `${Math.round(px * 1.8)}px system-ui, sans-serif`; ctx.fillText('（奥行き方向に2個）', px * 0.8, zy(sim.hmd.floorT + 12.5)); }
   ctx.textAlign = 'left';
   ctx.fillStyle = 'rgba(255,255,255,0.7)';
   ctx.font = `${Math.round(px * 2)}px system-ui, sans-serif`;
@@ -152,54 +210,56 @@ export function drawSection(canvas, sim, opt) {
 }
 
 // ---- 気化した成分の粒子 ----
-// 吸っている間、各成分が気化している葉セルから粒子を出し、気流に乗せて出口まで流す。
+// 吸っている間、各成分が気化している葉セル（中心の面）から粒子を出し、気流に乗せて出口まで流す。
 // 出す数は「その成分が30分で尽きる速さ」を基準にした相対量なので、微量の香料も見える。
 const parts = [];
 let partSim = null, lastNow = 0, colors = [];
 function drawParticles(ctx, sim, opt, px) {
-  const g = sim.g, { W, H, mat } = g, fl = sim.flow, nc = sim.nc;
-  if (partSim !== sim) { parts.length = 0; partSim = sim; colors = sim.compKeys.map((k, n) => compColor(k, n)); }
+  const fl = sim.flow, nc = sim.nc;
+  if (partSim !== sim) {
+    parts.length = 0; partSim = sim; colors = sim.compKeys.map((k, n) => compColor(k, n));
+    sim._slice = []; sim.st.tob.forEach((i, t) => { if (iyOf(i) === 1) sim._slice.push(t); });
+  }
   const dt = Math.min(0.05, (opt.now - lastNow) / 1000);
   lastNow = opt.now;
   if (!(dt > 0)) return;
-  const nt = g.tob.length;
+  const sl = sim._slice, nt = sim.st.tob.length;
   if (opt.lpm > 0 && parts.length < 1500) {
-    const cellMol = 1e-9, bedCells = nt;
+    const cellMol = 8e-9;
     for (let k = 0; k < nc; k++) {
       let total = 0, peak = 0;
       for (let t = 0; t < nt; t++) { const e = sim.evap[t * nc + k]; total += e; if (e > peak) peak = e; }
       if (peak <= 0) continue;
-      const ref = (sim.c0[k] * cellMol * bedCells) / 1800; // 30分で尽きる速さ [mol/s]
+      const ref = (sim.c0[k] * cellMol * nt) / 1800; // 30分で尽きる速さ [mol/s]
       let n = 45 * Math.min(2.5, total / ref) * dt;
       n = Math.floor(n) + (Math.random() < n % 1 ? 1 : 0);
       for (let q = 0; q < n; q++) {
         for (let tries = 0; tries < 10; tries++) {
-          const t = Math.floor(Math.random() * nt);
+          const t = sl[Math.floor(Math.random() * sl.length)];
           if (Math.random() * peak > sim.evap[t * nc + k]) continue;
-          const idx = g.tob[t];
-          parts.push({ x: (idx % W) + Math.random(), y: Math.floor(idx / W) + Math.random(), k, age: 0 });
+          const idx = sim.st.tob[t];
+          parts.push({ x: cellX(ixOf(idx)) + (Math.random() - 0.5) * D, z: cellZ(izOf(idx)) + (Math.random() - 0.5) * D, k, age: 0 });
           break;
         }
       }
     }
   }
   let vref = 0;
-  for (let t = 0; t < nt; t += 7) { const i = g.tob[t]; vref = Math.max(vref, Math.hypot(fl.vx[i], fl.vz[i])); }
+  for (const t of sl) { const i = sim.st.tob[t]; vref = Math.max(vref, Math.hypot(fl.vx[i], fl.vz[i])); }
   const speed = (opt.lpm > 0 ? opt.lpm / 12 : 0.15) * 14 / (vref || 1);
   const r = Math.max(1.5, px * 0.28);
   for (let p = parts.length - 1; p >= 0; p--) {
     const a = parts[p];
-    const idx = Math.floor(a.y) * W + Math.floor(a.x);
-    const vx = fl.vx[idx], vz = fl.vz[idx], v = Math.hypot(vx, vz);
+    const i = cellOf(a.x, a.z);
+    const vx = fl.vx[i], vz = fl.vz[i], v = Math.hypot(vx, vz);
     a.age += dt;
-    if (a.y >= H - 1 || a.age > 5 || mat[idx] === M.AMBIENT || v === 0) { parts.splice(p, 1); continue; }
-    // 穴の中は流速が大きいので上限を設ける
+    if (a.z < GRID.zTop - GRID.NZ * D + 1 || a.age > 5 || sim.mat[i] === M.AMBIENT || v === 0) { parts.splice(p, 1); continue; }
     const s = Math.min(60, v * speed) / v;
     a.x += vx * s * dt + (Math.random() - 0.5) * 0.15;
-    a.y += vz * s * dt;
+    a.z -= vz * s * dt;
     ctx.globalAlpha = Math.min(1, 1.2 - a.age / 5);
     ctx.fillStyle = colors[a.k];
-    ctx.beginPath(); ctx.arc(a.x * px, a.y * px, a.k === 1 ? r * 1.25 : r, 0, 6.283); ctx.fill();
+    ctx.beginPath(); ctx.arc((a.x + DW / 2) * px, (GRID.zTop - a.z) * px, a.k === 1 ? r * 1.25 : r, 0, 6.283); ctx.fill();
   }
   ctx.globalAlpha = 1;
 }
@@ -242,6 +302,16 @@ export function drawHistory(canvas, sim) {
     ctx.strokeStyle = css('--warn'); ctx.setLineDash([4, 4]);
     ctx.beginPath(); ctx.moveTo(pad.l, Y(sc)); ctx.lineTo(w - pad.r, Y(sc)); ctx.stroke(); ctx.setLineDash([]);
   }
+  // 炭の操作の印
+  const EV = { ash: '灰', swap: '入替', layout: '配置', replace: '新炭' };
+  ctx.font = '10px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  for (const e of sim.events || []) {
+    if (e.t < tStart) continue;
+    ctx.strokeStyle = css('--muted'); ctx.setLineDash([2, 3]);
+    ctx.beginPath(); ctx.moveTo(X(e.t), pad.t); ctx.lineTo(X(e.t), h - pad.b); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = css('--muted'); ctx.fillText(EV[e.kind] || e.kind, X(e.t), pad.t);
+  }
+  ctx.font = '11px system-ui, sans-serif';
   const series = [['hmd', 'HMD床', css('--s4')], ['top', '上層', css('--s1')], ['mid', '中層', css('--s2')], ['bot', '下層', css('--s3')]];
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   const ends = [];
@@ -314,4 +384,4 @@ export function drawVolatility(canvas, sim) {
   for (const e of ends) { ctx.fillStyle = e.color; ctx.fillText(e.label, w - pad.r + 6, e.y - Math.max(0, over)); }
 }
 
-export { AMBIENT_C };
+export { AMBIENT_C, LUT };

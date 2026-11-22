@@ -4,7 +4,7 @@ import { Sim } from '../js/sim.js';
 const [b = 'cosmoTurkish', h = 'onmo', l = 'l2p1', f = 'afTwoApples', mins = '12', cs = '25'] = process.argv.slice(2);
 const t0 = Date.now();
 const s = new Sim(BOWLS[b], HMDS[h], LAYOUTS[l], FLAVORS[f], +cs);
-console.log('build ms', Date.now() - t0, 'dtMax', s.dtMax.toFixed(4), 'tob cells', s.g.tob.length, 'coals', s.g.nCoals);
+console.log('build ms', Date.now() - t0, 'dtMax', s.dtMax.toFixed(4), 'tob cells', s.st.tob.length, 'coals', s.coals.length);
 const warm = 300;
 for (let t = 0; t < +mins * 60; t += 0.2) {
   const ph = (t - warm) % PUFF.autoPeriod;
